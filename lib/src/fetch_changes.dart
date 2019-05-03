@@ -15,28 +15,8 @@ import 'package:resource/resource.dart' show Resource;
 
 const String project = "dart-ci";
 const bool useStaticData = false; // Used during local testing only.
-List<Map<String, dynamic>> changes;
 
-Future<void> fetchData() async {
-  if (useStaticData) {
-    final changesPath = Resource("package:dart_ci/src/resources/changes.json");
-    changes = await loadJsonLines(changesPath);
-    return;
-  }
-  var client;
-  try {
-    client = await auth.clientViaMetadataServer();
-  } catch (e) {
-    print(e);
-    var keyPath = Platform.environment['GCLOUD_KEY'];
-    var key = await File(keyPath).readAsString();
-    final scopes = ['https://www.googleapis.com/auth/cloud-platform'];
-    client = await auth.clientViaServiceAccount(
-        auth.ServiceAccountCredentials.fromJson(key), scopes);
-  }
-  var bigQuery = BigqueryApi(client);
-  try {
-    var queryRequestJson = {
+const Map<String, dynamic> changesQueryJson = {
       "kind": "bigquery#queryRequest",
       "query": """
 SELECT TO_JSON_STRING(t)
@@ -55,17 +35,57 @@ LIMIT 50000
       "useQueryCache": true,
       "useLegacySql": false,
       "location": "US"
-    };
+};
 
-    final queryRequest = QueryRequest.fromJson(queryRequestJson);
-    print("Starting query $queryRequestJson");
+Map<String, dynamic> resultsQueryJson(String commit, int days) => {
+      "kind": "bigquery#queryRequest",
+      "query": """
+SELECT TO_JSON_STRING(t)
+FROM `dart-ci.results.results` as t
+WHERE _PARTITIONTIME > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL $days DAY)
+  AND commit_hash = '$commit'
+""",
+//  AND NOT STARTS_WITH(builder_name, 'vm-')
+//  AND NOT STARTS_WITH(builder_name, 'dart2js-')
+//""",
+      "maxResults": 10000,
+      "timeoutMs": 60000,
+      "useQueryCache": true,
+      "useLegacySql": false,
+      "location": "US"
+};
+
+
+List<Map<String, dynamic>> changes;
+
+Future<List<Map<String, dynamic>>> fetchData(Map<String, dynamic> queryJson) async {
+  if (useStaticData) {
+    final changesPath = Resource("package:dart_ci/src/resources/changes.json");
+    return await loadJsonLines(changesPath);
+  }
+  var client;
+  try {
+    client = await auth.clientViaMetadataServer();
+  } catch (e) {
+    print(e);
+    var keyPath = Platform.environment['GCLOUD_KEY'];
+    var key = await File(keyPath).readAsString();
+    final scopes = ['https://www.googleapis.com/auth/cloud-platform'];
+    client = await auth.clientViaServiceAccount(
+        auth.ServiceAccountCredentials.fromJson(key), scopes);
+  }
+  var bigQuery = BigqueryApi(client);
+  try {
+
+    final queryRequest = QueryRequest.fromJson(queryJson);
+    print("Starting query $queryJson");
     QueryResponse response = await bigQuery.jobs.query(queryRequest, project);
     int numRows;
     String pageToken;
     final newChanges = <Map<String, dynamic>>[];
     if (response.errors != null && response.errors.isNotEmpty) {
       response.errors.forEach((e) => print(e.toJson().toString()));
-      return;
+      return [];
     } else {
       numRows = int.parse(response.totalRows);
       pageToken = response.pageToken;
@@ -78,7 +98,7 @@ LIMIT 50000
       }
     }
     print("numRows: $numRows newchanges.length: ${newChanges.length}");
-    while (numRows > newChanges.length && newChanges.length < 300000) {
+    while (numRows > newChanges.length && newChanges.length < 2000000) {
       print("Getting another page of query responses");
       var job = response.jobReference;
       GetQueryResultsResponse pageResponse = await bigQuery.jobs
@@ -98,12 +118,11 @@ LIMIT 50000
         print("pageResponse.rows: ${pageResponse.rows}");
       }
     }
-    if (newChanges.isNotEmpty) {
-      changes = newChanges;
-    }
+    return newChanges;
   } catch (e, t) {
     print(e);
     print(t);
+    return null;
   } finally {
     print("closing client");
     client.close();

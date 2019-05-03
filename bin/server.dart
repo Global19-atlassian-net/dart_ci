@@ -10,9 +10,10 @@ import 'dart:io';
 import 'package:dart_ci/src/approvals_feed.dart';
 import 'package:dart_ci/src/get_log.dart';
 import 'package:dart_ci/src/group_changes.dart';
-import 'package:dart_ci/src/fetch_changes.dart';
+import 'package:dart_ci/src/fetch_changes.dart' as fetch;
 
 String changesPage;
+String cachedDevChangesPage;
 
 void main() async {
   await refresh();
@@ -30,9 +31,12 @@ void main() async {
 }
 
 Future<void> refresh() async {
-  await fetchData();
+  final newChanges = await fetch.fetchData(fetch.changesQueryJson);
+  if (newChanges != null && newChanges.isNotEmpty) {
+    fetch.changes = newChanges;
+  }
   changesPage = await createChangesPage();
-  await getApprovals();
+  // await getApprovals();
 }
 
 Future<void> dispatchingServer(HttpRequest request) async {
@@ -42,6 +46,9 @@ Future<void> dispatchingServer(HttpRequest request) async {
     } else if (request.uri.path.startsWith('/log/')) {
       return await serveLog(request);
     } else if (request.uri.path.startsWith('/changes')) {
+      if (request.uri.path.startsWith('/changes/dev')) {
+        return await serveDevChanges(request);
+      }
       return await serveChanges(request);
     } else if (request.uri.path.startsWith('/approvals/')) {
       return await serveApprovals(request);
@@ -106,6 +113,16 @@ Future<void> serveChanges(HttpRequest request) async {
   final response = request.response;
   response.headers.contentType = ContentType.html;
   response.write(changesPage);
+  return response.close();
+}
+
+Future<void> serveDevChanges(HttpRequest request) async {
+  final response = request.response;
+  response.headers.contentType = ContentType.html;
+  if (cachedDevChangesPage == null) {
+    cachedDevChangesPage = await devChangesPage();
+  }
+  response.write(cachedDevChangesPage);
   return response.close();
 }
 

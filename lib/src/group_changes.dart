@@ -12,7 +12,7 @@ import 'dart:io';
 
 import 'package:resource/resource.dart' show Resource;
 
-import 'package:dart_ci/src/fetch_changes.dart';
+import 'package:dart_ci/src/fetch_changes.dart' as fetch;
 
 class MinMax {
   int min = null;
@@ -62,6 +62,7 @@ class Result {
       expected == other.expected &&
       matches == other.matches;
   int get hashCode => "$previous$current$expected$matches".hashCode;
+  String toString() => "was: $previous is: $currentkey expected: $expected";
 }
 
 /// This object represents a set of changes that agree on the
@@ -89,7 +90,10 @@ class SummaryData {
   final MinMax commits;
 
   SummaryData(this.configSetKey, this.test, this.result, this.previousCommits,
-      this.commits);
+    this.commits);
+
+  String toString() => "configSetKey: $configSetKey test: $test result: $result "
+   "previousCommits: $previousCommits commits: $commits";
 }
 
 /// Sort SummaryData objects first by blamelist end, then by blamelist start,
@@ -97,22 +101,132 @@ class SummaryData {
 /// All objects with the same blamelist and same
 /// configSetKey will then be grouped together.
 int compare4keys(SummaryData a, SummaryData b) {
+  try {
   return [
     a.commits.max.compareTo(b.commits.max),
     a.previousCommits.min.compareTo(b.previousCommits.min),
     a.configSetKey.compareTo(b.configSetKey),
     a.test.compareTo(b.test)
   ].firstWhere((c) => c != 0, orElse: () => 0);
+} catch (e,t) {
+  print(e);
+  print(t);
+  print(a);
+  print(b);
+}
+}
+
+Future<String> devChangesPage() async {
+  final hashes = <String>[];
+  final commitData = <String>[];
+  final reviewLinks = <String>[];
+  // fetch dev revision commit
+  Map<String, dynamic> devBranchHead =
+      (await commitInformation("dev", 1))["log"].first as Map<String, dynamic>;
+  final devHash = devBranchHead["commit"];
+  hashes.add(devHash);
+  commitData.add(devBranchHead["message"]);
+  reviewLinks.add("https://dart.googlesource.com/sdk/+/dev");
+  // fetch dev revision test results. Drop them later by setting ref to null.
+  List<Map<String, dynamic>> devResults =
+      await fetch.fetchData(fetch.resultsQueryJson(devHash, 30));
+  // fetch base revision commit
+  final Map<String, dynamic> baseBranchHead =
+      (await commitInformation("base", 1))["log"].first as Map<String, dynamic>;
+  final baseHash = baseBranchHead["commit"];
+  hashes.add(baseHash);
+  commitData.add(baseBranchHead["message"]);
+  reviewLinks.add("https://dart.googlesource.com/sdk/+/base");
+  // fetch base revision test results
+  List<Map<String, dynamic>> baseResults =
+      await fetch.fetchData(fetch.resultsQueryJson(baseHash, 3));
+  // combine results to changes records
+  print(devResults.length);
+  print(baseResults.length);
+  print(devResults.take(5));
+  print(baseResults.take(5));
+
+  final changesByTestAndConfiguration =
+      Map<String, Map<String, Map<String, dynamic>>>();
+  // summarize page data
+
+  for (final result in devResults) {
+    final test = result['name'];
+    if (test == null) {
+      print(result);
+      continue;
+    }
+    final configuration = result['configuration'];
+    changesByTestAndConfiguration.putIfAbsent(
+            test, () => <String, Map<String, dynamic>>{})[configuration] =
+        <String, dynamic>{
+      'previous_result': result['result'],
+      'previous_flaky': result['flaky'],
+      'previous_expected': result['expected'],
+      'matches': result['matches']
+    };
+  }
+
+  devResults = null;
+  for (final result in baseResults) {
+    final test = result['name'];
+    if (test == null) {
+      print(result);
+      continue;
+    }
+    final configuration = result['configuration'];
+    final newResult = changesByTestAndConfiguration
+        .putIfAbsent(test, () => <String, Map<String, dynamic>>{})
+        .putIfAbsent(configuration, () => <String, dynamic>{});
+    newResult['result'] = result['result'];
+    newResult['flaky'] = result['flaky'];
+    newResult['expected'] = result['expected'];
+    newResult['matches'] = result['matches'];
+  }
+  baseResults = null;
+
+  MinMax previousCommits = MinMax()..add(1);
+  MinMax commits = MinMax()..add(0);
+  final summaryData = <SummaryData>[];
+  for (final test in changesByTestAndConfiguration.keys) {
+    final changesByConfiguration = changesByTestAndConfiguration[test];
+    final byResult = <Result, List<Map<String, dynamic>>>{};
+    for (final configuration in changesByConfiguration.keys) {
+      final change = changesByConfiguration[configuration];
+      change['configuration'] = configuration;
+      final result = Result(change);
+      if (result.previous == result.current) continue;
+      if (result.current == null || change['matches'] ) continue;
+      
+      byResult.putIfAbsent(result, () => <Map<String, dynamic>>[]).add(change);
+    }
+    changesByTestAndConfiguration[test] = null;
+    for (final result in byResult.keys) {
+      final configs = <String>[];
+      for (final change in byResult[result]) {
+        configs.add(change["configuration"]);
+      }
+      configs.sort();
+      final configSetKey = configs.join(",<br>");
+      configSets[configSetKey] = configs;
+      summaryData.add(
+          SummaryData(configSetKey, test, result, previousCommits, commits));
+    }
+  }
+
+  summaryData.sort(compare4keys);
+  return htmlPage(summaryData, hashes, commitData, reviewLinks);
 }
 
 Future<String> createChangesPage() async {
-  if (changes == null) return "Unable to fetch changes";
+  if (fetch.changes == null) return "Unable to fetch changes";
   final hashes = <String>[];
   final commitData = <String>[];
   final reviewLinks = <String>[];
   const reviewPrefix = "Reviewed-on: ";
   // Load data from gerrit/git REST API
-  final commits = (await commitInformation())["log"] as List<dynamic>;
+  final commits =
+      (await commitInformation("master", 400))["log"] as List<dynamic>;
   for (Map<String, dynamic> commit in commits) {
     hashes.add(commit["commit"]);
     reviewLinks.add(commit["message"]
@@ -133,17 +247,17 @@ Future<String> createChangesPage() async {
   }
 
   // Changes come from global server data, fetched by server.
-  final summaryData = summarizePageData(changes, hashes);
+  final summaryData = summarizePageData(fetch.changes, hashes);
   summaryData.sort(compare4keys);
   return htmlPage(summaryData, hashes, commitData, reviewLinks);
 }
 
 /// Fetch information about the commits to sdk @ dart.googlesource
 /// using Gitiles API: http://go/gob/users/rest-api#gitiles-api
-Future<Map<String, dynamic>> commitInformation() async {
+Future<Map<String, dynamic>> commitInformation(String branch, int count) async {
   final client = HttpClient();
   final request = await client.getUrl(Uri.parse(
-      "https://dart.googlesource.com/sdk/+log/master?n=400&format=JSON"));
+      "https://dart.googlesource.com/sdk/+log/$branch?n=$count&format=JSON"));
   final response = await request.close();
   return (await response
       .transform(utf8.decoder)
@@ -391,13 +505,14 @@ String htmlPage(List<SummaryData> data, List<String> hashes,
               "${formattedResult(summary.result)}</td></tr>");
         }
         if (configSetList.length > 50) {
-          page.write("<tr><td class='nomatch'>&hellip;</td>"
+          page.write("<tr><td class='nomatch'>&hellip; ${configSetList.length} </td>"
               "<td class='nomatch'> &nbsp;&nbsp;&hellip;</td></tr>");
         }
         page.write("</table>");
 
         final configSetKey = configSetList.last.configSetKey;
         final configSet = configSets[configSetKey];
+        if (configSet != null) {
         var plural = "s";
         if (configSet.length == 1) plural = "";
         page.write("&nbsp;&nbsp;&nbsp;&nbsp;on configuration$plural ");
@@ -420,6 +535,9 @@ String htmlPage(List<SummaryData> data, List<String> hashes,
             page.write(" ${entry.value.join(' ')} </span>");
           }
         }
+      } else {
+        page.write("ConfigSet was null, configSetKey was $configSetKey");
+      }
         page.write("<br><br>");
       }
     }
