@@ -12,12 +12,15 @@ import 'dart:io';
 import 'package:googleapis/bigquery/v2.dart';
 import 'package:googleapis_auth/auth_io.dart' as auth;
 import 'package:resource/resource.dart' show Resource;
+import 'package:sqljocky5/sqljocky.dart';
 
 const String project = "dart-ci";
 const bool useStaticData = false; // Used during local testing only.
 List<Map<String, dynamic>> changes;
 
 Future<void> fetchData() async {
+  changes = await getChanges(7006, 'results_test');
+  return;
   if (useStaticData) {
     final changesPath = Resource("package:dart_ci/src/resources/changes.json");
     changes = await loadJsonLines(changesPath);
@@ -108,6 +111,76 @@ LIMIT 50000
     print("closing client");
     client.close();
   }
+}
+
+final stringFields = [
+'configuration',
+'builder_name',
+'bot_name',
+'name',
+'suite',
+'test_name',
+'result',
+'expected',
+'commit_hash',
+'previous_commit_hash',
+'previous_result'
+];
+
+final dateTimeFields = [
+'commit_time',
+'previous_commit_time'
+];
+
+final booleanFields = [
+'matches',
+'changed',
+'flaky',
+'previous_flaky'
+];
+
+final intFields = [
+'time_ms',
+'build_number',
+'previous_build_number'
+];
+
+Future<List<Map<String, dynamic>>> getChanges(
+  int sqlPort, String databaseName) async {
+  final user = "reader";
+  final s = ConnectionSettings(
+    user: user,
+    host: "127.0.0.1",
+    port: sqlPort,
+    db: databaseName
+  );
+  var conn = await MySqlConnection.connect(s);
+
+  StreamedResults results = await conn.execute('select * from changed ;');
+
+  var rows = <Map<String, dynamic>>[];
+  await results.forEach((Row row) {
+    // send query to database
+    // iterate through rows, printing selected data
+    var map = <String, dynamic>{};
+    for (String field in stringFields) {
+      map[field] = row.byName(field) as String;
+    }
+    for (String field in dateTimeFields) {
+      map[field] = row.byName(field) as DateTime;
+    }
+    for (String field in intFields) {
+      map[field] = row.byName(field) as int;
+    }
+    for (String field in booleanFields) {
+      map[field] = (row.byName(field) != 0);
+    }
+    rows.add(map);
+});
+print( rows.length);
+print(rows.last);
+await conn.close();
+return rows;
 }
 
 Future<List<Map<String, dynamic>>> loadJsonLines(Resource resource) async {

@@ -143,7 +143,7 @@ Future<String> createChangesPage() async {
 Future<Map<String, dynamic>> commitInformation() async {
   final client = HttpClient();
   final request = await client.getUrl(Uri.parse(
-      "https://dart.googlesource.com/sdk/+log/master?n=400&format=JSON"));
+      "https://dart.googlesource.com/sdk/+log/master?n=1000&format=JSON"));
   final response = await request.close();
   return (await response
       .transform(utf8.decoder)
@@ -183,7 +183,11 @@ List<SummaryData> summarizePageData(
   final resultsForTestAndChange =
       Map<String, Map<Result, List<Map<String, dynamic>>>>();
 
-  for (final Map<String, dynamic> change in changes) {
+      for (final Map<String, dynamic> change in changes) {
+        if (hashIndex[change['commit_hash']] == null) continue;
+        if (change['previous_commit_hash'] == null) continue;
+        if (hashIndex[change['previous_commit_hash']] == null) continue;
+        
     final name = change['name'];
     final result = Result.fromJson(change);
     if (result.newPass) continue;
